@@ -187,6 +187,83 @@ async function entryRoutes(fastify, options) {
       reply.code(200).send(result);
     }
   );
+
+  //get all entries where the name contains the search term
+  fastify.get(
+    "/entries/search",
+    {
+      schema: {
+        description: "Search entries",
+        tags: ["Entries"],
+        querystring: {
+          type: "object",
+          properties: {
+            search: {
+              type: "string",
+              description: "Search term",
+            },
+          },
+        },
+        response: {
+          200: {
+            description: "Success",
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                _id: { type: "string" },
+                review: { type: "string" },
+                reviewer: {
+                  type: "object",
+                  properties: {
+                    _id: { type: "string" },
+                    name: { type: "string" },
+                    email: { type: "string" },
+                  },
+                },
+                game: {
+                  type: "object",
+                  properties: {
+                    _id: { type: "string" },
+                    rawgId: { type: "string" },
+                    title: { type: "string" },
+                    imageUrl: { type: "string" },
+                    platform: { type: "string" },
+                  },
+                },
+                playedOnPlatform: { type: "number" },
+                createdAt: { type: "string" },
+                updatedAt: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const search = req.query.search || "";
+        const regex = new RegExp(search, "i"); // case-insensitive
+
+        const entries = await Entry.find()
+          .populate("reviewer")
+          .populate("gameid");
+
+        const result = entries
+          .filter((entry) => entry.gameid.title.match(regex))
+          .map((e) => {
+            const obj = e.toObject();
+            obj.game = obj.gameid;
+            delete obj.gameid;
+            return obj;
+          });
+
+        return reply.code(200).send(result);
+      } catch (err) {
+        reply.code(400).send({ error: err.message });
+      }
+    }
+  );
 }
 
 export default entryRoutes;

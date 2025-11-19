@@ -1,55 +1,84 @@
 import Game from "../models/Game.js";
 
 async function gameRoutes(fastify, options) {
-  // retrieve a game by name
+  // Hybrid search for backlog
   fastify.get(
-    "/games/:name",
+    "/games/search",
     {
       schema: {
-        description: "Retrieve a game by name",
+        description: "Hybrid search for games (local DB + RAWG fallback)",
         tags: ["Games"],
-        params: {
+        querystring: {
           type: "object",
           properties: {
-            name: {
-              type: "string",
-            },
+            name: { type: "string" },
           },
-          additionalProperties: false,
+          required: ["name"],
         },
         response: {
           200: {
-            type: "object",
-            description: "Succes",
-            properties: {
-              _id: { type: "string" },
-              rawgId: { type: "string" },
-              steamgriddbId: { type: "string" },
-              title: { type: "string" },
-              imageUrl: { type: "string" },
-              platform: { type: "string" },
-              createdAt: { type: "string" },
-              updatedAt: { type: "string" },
-            },
-          },
-          404: {
-            type: "object",
-            description: "Error",
-            properties: {
-              error: { type: "string" },
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                _id: { type: "string" },
+                rawgId: { type: "string" },
+                title: { type: "string" },
+                imageUrl: { type: "string" },
+                platform: { type: "string" },
+                createdAt: { type: "string" },
+                updatedAt: { type: "string" },
+              },
             },
           },
         },
       },
     },
     async (req, reply) => {
-      let game = await Game.findOne({ title: req.params.name });
+      try {
+        const search = req.query.name;
+        const regex = new RegExp(search, "i");
 
-      if (!game) {
-        return reply.code(404).send({ error: "Game not found" });
+        // games in local DB
+        let localGames = await Game.find({ title: regex });
+
+        if (localGames.length < 5) {
+          const remaining = 5 - localGames.length;
+
+          // fetch from RAWG
+          const rawgRes = await fetch(
+            `https://api.rawg.io/api/games?key=${
+              process.env.RAWG_API_KEY
+            }&search=${encodeURIComponent(search)}&page_size=${remaining}`
+          );
+          const rawgData = await rawgRes.json();
+
+          const now = new Date().toISOString();
+
+          const rawgGames = rawgData.results.map((game) => ({
+            _id: game.id.toString(),
+            rawgId: game.id.toString(),
+            title: game.name,
+            imageUrl: game.background_image,
+            platform:
+              game.platforms?.map((p) => p.platform.name).join(", ") || "",
+            createdAt: null,
+            updatedAt: now,
+          }));
+
+          // Merge local and RAWG results, avoiding duplicatesd
+          const existingIds = new Set(localGames.map((g) => g.rawgId));
+          localGames = [
+            ...localGames,
+            ...rawgGames.filter((g) => !existingIds.has(g.rawgId)),
+          ];
+        }
+
+        // Return combined results
+        reply.code(200).send(localGames);
+      } catch (err) {
+        reply.code(400).send({ error: err.message });
       }
-
-      reply.code(200).send(game);
     }
   );
 
