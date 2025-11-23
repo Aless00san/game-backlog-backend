@@ -1,59 +1,54 @@
-import Entry from "../models/Entry.js";
-import User from "../models/User.js";
-import Game from "../models/Game.js";
+import Entry from '../models/Entry.js';
+import User from '../models/User.js';
+import Game from '../models/Game.js';
 
 async function entryRoutes(fastify, options) {
+  // CREATE ENTRY
   fastify.post(
-    "/entries",
+    '/entries',
     {
       schema: {
-        description: "Create a new entry",
-        tags: ["Entries"],
+        description: 'Create a new entry',
+        tags: ['Entries'],
         body: {
-          type: "object",
-          required: [
-            "review",
-            "reviewer",
-            "date",
-            "gameid",
-            "playedOnPlatform",
-          ],
+          type: 'object',
+          required: ['user', 'gameid', 'playedOnPlatform'],
           properties: {
-            review: { type: "string" },
-            reviewer: { type: "string" }, // user _id
-            date: { type: "string" }, // DD/MM/YYYY or ISO
-            gameid: { type: "string" },
-            playedOnPlatform: { type: "number" },
+            user: { type: 'string' },
+            gameid: { type: 'string' }, // RAWG ID or Mongo ID?
+            playedOnPlatform: { type: 'number' },
+            status: {
+              type: 'string',
+              enum: ['Backlog', 'Playing', 'Completed'],
+              default: 'Backlog',
+            },
           },
         },
         response: {
           201: {
-            type: "object",
-            description: "Entry created successfully",
+            type: 'object',
             properties: {
-              _id: { type: "string" },
-              review: { type: "string" },
-              reviewer: {
-                type: "object",
+              _id: { type: 'string' },
+              user: {
+                type: 'object',
                 properties: {
-                  _id: { type: "string" },
-                  name: { type: "string" },
-                  email: { type: "string" },
+                  _id: { type: 'string' },
+                  name: { type: 'string' },
                 },
               },
               game: {
-                type: "object",
+                type: 'object',
                 properties: {
-                  _id: { type: "string" },
-                  rawgId: { type: "string" },
-                  title: { type: "string" },
-                  imageUrl: { type: "string" },
-                  platform: { type: "string" },
+                  _id: { type: 'string' },
+                  rawgId: { type: 'string' },
+                  title: { type: 'string' },
+                  imageUrl: { type: 'string' },
                 },
               },
-              playedOnPlatform: { type: "number" },
-              createdAt: { type: "string" },
-              updatedAt: { type: "string" },
+              playedOnPlatform: { type: 'number' },
+              status: { type: 'string' },
+              createdAt: { type: 'string' },
+              updatedAt: { type: 'string' },
             },
           },
         },
@@ -61,110 +56,93 @@ async function entryRoutes(fastify, options) {
     },
     async (req, reply) => {
       try {
-        const { reviewer, review, date, gameid, playedOnPlatform } = req.body;
+        const { user, gameid, playedOnPlatform, status } = req.body;
 
-        // Validate reviewer
-        const user = await User.findById(reviewer);
-        if (!user) return reply.code(404).send({ error: "Reviewer not found" });
+        // Validate user
+        const existingUser = await User.findById(user);
+        if (!existingUser)
+          return reply.code(404).send({ error: 'User not found' });
 
-        // Find game by RAWG ID
-        const game = await Game.findOne({ rawgId: gameid });
-        if (!game) return reply.code(404).send({ error: "Game not found" });
+        // Find game by rawgId OR by _id
+        const game =
+          (await Game.findOne({ rawgId: gameid })) ||
+          (await Game.findById(gameid));
 
-        // Parse date (support DD/MM/YYYY or ISO)
-        let parsedDate;
-        if (date.includes("/")) {
-          const [day, month, year] = date.split("/");
-          parsedDate = new Date(`${year}-${month}-${day}`);
-        } else {
-          parsedDate = new Date(date);
-        }
+        if (!game) return reply.code(404).send({ error: 'Game not found' });
 
+        // Check duplicate
         const existingEntry = await Entry.findOne({
-          reviewer: reviewer,
+          user,
           gameid: game._id,
-          playedOnPlatform: playedOnPlatform,
-        });
-
-        if (existingEntry) {
-          return reply
-            .code(400)
-            .send({ error: "You already reviewed this game on this platform" });
-        }
-
-        // Create entry
-        const entry = new Entry({
-          reviewer,
-          gameid: game._id, // store Mongo _id for populate
-          review,
-          date: parsedDate,
           playedOnPlatform,
         });
 
-        try {
-          await entry.save();
-        } catch (err) {
-          if (err.code === 11000) {
-            return reply.code(400).send({
-              error: "You already reviewed this game on this platform",
-            });
-          }
-        }
+        if (existingEntry)
+          return reply
+            .code(400)
+            .send({ error: 'Entry already exists for this platform' });
 
-        // Populate reviewer and game
+        // Create entry
+        const entry = new Entry({
+          user,
+          gameid: game._id,
+          playedOnPlatform,
+          status,
+        });
+
+        await entry.save();
+
         await entry.populate([
-          { path: "reviewer", select: "_id name email" },
-          { path: "gameid" }, // populate full game document
+          { path: 'user', select: '_id name' },
+          { path: 'gameid' },
         ]);
 
-        // Prepare response
-        const entryObj = entry.toObject();
-        entryObj.game = entryObj.gameid; // rename for clarity
-        delete entryObj.gameid;
+        // Rename gameid → game
+        const obj = entry.toObject();
+        obj.game = obj.gameid;
+        delete obj.gameid;
 
-        reply.code(201).send(entryObj);
+        reply.code(201).send(obj);
       } catch (err) {
         reply.code(400).send({ error: err.message });
       }
     }
   );
 
+  // GET ALL ENTRIES
   fastify.get(
-    "/entries",
+    '/entries',
     {
       schema: {
-        description: "Retrieve all entries",
-        tags: ["Entries"],
+        description: 'Retrieve all entries',
+        tags: ['Entries'],
         response: {
           200: {
-            description: "Success",
-            type: "array",
+            type: 'array',
             items: {
-              type: "object",
+              type: 'object',
               properties: {
-                _id: { type: "string" },
-                review: { type: "string" },
-                reviewer: {
-                  type: "object",
+                _id: { type: 'string' },
+                user: {
+                  type: 'object',
                   properties: {
-                    _id: { type: "string" },
-                    name: { type: "string" },
-                    email: { type: "string" },
+                    _id: { type: 'string' },
+                    name: { type: 'string' },
                   },
                 },
                 game: {
-                  type: "object",
+                  type: 'object',
                   properties: {
-                    _id: { type: "string" },
-                    rawgId: { type: "string" },
-                    title: { type: "string" },
-                    imageUrl: { type: "string" },
-                    platform: { type: "string" },
+                    _id: { type: 'string' },
+                    rawgId: { type: 'string' },
+                    title: { type: 'string' },
+                    imageUrl: { type: 'string' },
                   },
                 },
-                playedOnPlatform: { type: "number" },
-                createdAt: { type: "string" },
-                updatedAt: { type: "string" },
+                playedOnPlatform: { type: 'number' },
+                status: { type: 'string' },
+                createdAt: { type: 'string' },
+                updatedAt: { type: 'string' },
               },
             },
           },
@@ -173,11 +151,10 @@ async function entryRoutes(fastify, options) {
     },
     async (req, reply) => {
       const entries = await Entry.find()
-        .populate({ path: "reviewer", select: "_id name email" })
-        .populate({ path: "gameid" });
+        .populate({ path: 'user', select: '_id name' })
+        .populate({ path: 'gameid' });
 
-      // rename gameid to game, so the response knows what to show
-      const result = entries.map((e) => {
+      const result = entries.map(e => {
         const obj = e.toObject();
         obj.game = obj.gameid;
         delete obj.gameid;
@@ -188,77 +165,38 @@ async function entryRoutes(fastify, options) {
     }
   );
 
-  //get all entries where the name contains the search term
+  // SEARCH ENTRIES BY GAME NAME
   fastify.get(
-    "/entries/search",
+    '/entries/search',
     {
       schema: {
-        description: "Search entries",
-        tags: ["Entries"],
+        description: 'Search entries',
+        tags: ['Entries'],
         querystring: {
-          type: "object",
+          type: 'object',
           properties: {
-            search: {
-              type: "string",
-              description: "Search term",
-            },
-          },
-        },
-        response: {
-          200: {
-            description: "Success",
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                _id: { type: "string" },
-                review: { type: "string" },
-                reviewer: {
-                  type: "object",
-                  properties: {
-                    _id: { type: "string" },
-                    name: { type: "string" },
-                    email: { type: "string" },
-                  },
-                },
-                game: {
-                  type: "object",
-                  properties: {
-                    _id: { type: "string" },
-                    rawgId: { type: "string" },
-                    title: { type: "string" },
-                    imageUrl: { type: "string" },
-                    platform: { type: "string" },
-                  },
-                },
-                playedOnPlatform: { type: "number" },
-                createdAt: { type: "string" },
-                updatedAt: { type: "string" },
-              },
-            },
+            search: { type: 'string' },
           },
         },
       },
     },
     async (req, reply) => {
       try {
-        const search = req.query.search || "";
-        const regex = new RegExp(search, "i"); // case-insensitive
+        const search = req.query.search || '';
+        const regex = new RegExp(search, 'i');
 
-        const entries = await Entry.find()
-          .populate("reviewer")
-          .populate("gameid");
+        const entries = await Entry.find().populate('user').populate('gameid');
 
         const result = entries
-          .filter((entry) => entry.gameid.title.match(regex))
-          .map((e) => {
+          .filter(e => e.gameid.title.match(regex))
+          .map(e => {
             const obj = e.toObject();
             obj.game = obj.gameid;
             delete obj.gameid;
             return obj;
           });
 
-        return reply.code(200).send(result);
+        reply.code(200).send(result);
       } catch (err) {
         reply.code(400).send({ error: err.message });
       }
