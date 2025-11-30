@@ -1,14 +1,17 @@
-import Game from '../models/Game.js';
-import { distance } from 'fastest-levenshtein';
+import Game from "../models/Game.js";
+import Platform from "../models/Platform.js";
+import { distance } from "fastest-levenshtein";
+
+const MAX_FETCHED_GAMES = 6;
 
 function normalizeTitle(str) {
   return str
     .toLowerCase()
-    .replace(/g\.u\./g, 'gu')
-    .replace(/\/+/g, ' ')
-    .replace(/\.+/g, ' ')
-    .replace(/ver\s*\d+[\d\.]*/g, '')
-    .replace(/\b(part|episode)\s*\d+\b/g, '')
+    .replace(/g\.u\./g, "gu")
+    .replace(/\/+/g, " ")
+    .replace(/\.+/g, " ")
+    .replace(/ver\s*\d+[\d\.]*/g, "")
+    .replace(/\b(part|episode)\s*\d+\b/g, "")
     .trim();
 }
 
@@ -21,31 +24,31 @@ function levenshteinSimilarity(a, b) {
 
 async function gameRoutes(fastify, options) {
   fastify.get(
-    '/games/search',
+    "/games/search",
     {
       schema: {
-        description: 'Hybrid search for games (local DB + RAWG fallback)',
-        tags: ['Games'],
+        description: "Hybrid search for games (local DB + RAWG fallback)",
+        tags: ["Games"],
         querystring: {
-          type: 'object',
+          type: "object",
           properties: {
-            name: { type: 'string' },
+            name: { type: "string" },
           },
-          required: ['name'],
+          required: ["name"],
         },
         response: {
           200: {
-            type: 'array',
+            type: "array",
             items: {
-              type: 'object',
+              type: "object",
               properties: {
-                _id: { type: 'string' },
-                rawgId: { type: 'string' },
-                title: { type: 'string' },
-                imageUrl: { type: 'string' },
-                platform: { type: 'string' },
-                createdAt: { type: 'string' },
-                updatedAt: { type: 'string' },
+                _id: { type: "string" },
+                rawgId: { type: "string" },
+                title: { type: "string" },
+                imageUrl: { type: "string" },
+                platformNames: { type: "array", items: { type: "string" } },
+                createdAt: { type: "string" },
+                updatedAt: { type: "string" },
               },
             },
           },
@@ -54,35 +57,44 @@ async function gameRoutes(fastify, options) {
     },
     async (req, reply) => {
       try {
+        const platformDocs = await Platform.find().lean();
+        const platformMap = new Map(platformDocs.map((p) => [p._id, p.name]));
+
         const search = req.query.name;
-        const regex = new RegExp(search, 'i');
+        const regex = new RegExp(search, "i");
 
-        let localGames = await Game.find({ title: regex });
+        let localGames = await Game.find({ title: regex }).lean();
 
-        if (localGames.length < 6) {
-          const remaining = 6 - localGames.length;
+        //Map platforms to names
+        localGames.forEach((g) => {
+          g.platformNames = g.platforms
+            .map((p) => platformMap.get(p))
+            .filter(Boolean);
+        });
+
+        if (localGames.length < MAX_FETCHED_GAMES) {
+          const remaining = MAX_FETCHED_GAMES - localGames.length;
 
           const rawgRes = await fetch(
             `https://api.rawg.io/api/games?key=${
               process.env.RAWG_API_KEY
-            }&search=${encodeURIComponent(search)}&page_size=${remaining}`
+            }&search=${encodeURIComponent(search)}&page_size=${remaining * 2}`
           );
           const rawgData = await rawgRes.json();
           const now = new Date().toISOString();
 
-          const rawgGames = rawgData.results.map(game => ({
+          const rawgGames = rawgData.results.map((game) => ({
             _id: game.id.toString(),
             rawgId: game.id.toString(),
             title: game.name,
             imageUrl: game.background_image,
-            platform:
-              game.platforms?.map(p => p.platform.name).join(', ') || '',
+            platformNames: game.platforms?.map((p) => p.platform.name) || [],
             createdAt: null,
             updatedAt: now,
           }));
 
           await Promise.all(
-            rawgGames.map(async game => {
+            rawgGames.map(async (game) => {
               const steamSearch = normalizeTitle(game.title);
               const steamRes = await fetch(
                 `https://www.steamgriddb.com/api/v2/search/autocomplete/${steamSearch}`,
@@ -119,11 +131,13 @@ async function gameRoutes(fastify, options) {
             })
           );
 
-          const existingIds = new Set(localGames.map(g => g.rawgId));
-          localGames = [
+          const existingIds = new Set(localGames.map((g) => g.rawgId));
+          const mergedGames = [
             ...localGames,
-            ...rawgGames.filter(g => !existingIds.has(g.rawgId)),
+            ...rawgGames.filter((g) => !existingIds.has(g.rawgId)),
           ];
+
+          localGames = mergedGames.slice(0, 6);
         }
 
         reply.code(200).send(localGames);
@@ -134,36 +148,36 @@ async function gameRoutes(fastify, options) {
   );
 
   fastify.post(
-    '/games',
+    "/games",
     {
       schema: {
-        description: 'Add a new game',
-        tags: ['Games'],
+        description: "Add a new game",
+        tags: ["Games"],
         body: {
-          type: 'object',
-          required: ['title', 'imageUrl', 'platform'],
+          type: "object",
+          required: ["title", "imageUrl", "platforms"],
           properties: {
-            title: { type: 'string' },
-            rawgId: { type: 'string' },
-            imageUrl: { type: 'string' },
-            platforms: { type: 'array', items: { type: 'string' } },
+            title: { type: "string" },
+            rawgId: { type: "string" },
+            imageUrl: { type: "string" },
+            platforms: { type: "array", items: { type: "number" } },
           },
         },
         response: {
           201: {
-            type: 'object',
-            description: 'Succes',
+            type: "object",
+            description: "Succes",
             properties: {
-              _id: { type: 'string' },
-              title: { type: 'string' },
-              rawgId: { type: 'string' },
+              _id: { type: "string" },
+              title: { type: "string" },
+              rawgId: { type: "string" },
             },
           },
           400: {
-            type: 'object',
-            description: 'Error',
+            type: "object",
+            description: "Error",
             properties: {
-              error: { type: 'string' },
+              error: { type: "string" },
             },
           },
         },
@@ -171,9 +185,10 @@ async function gameRoutes(fastify, options) {
     },
     async (req, reply) => {
       try {
-        const { title, rawgId, imageUrl, platform } = req.body;
+        const { title, rawgId, imageUrl, platforms } = req.body;
 
-        const game = new Game({ title, rawgId, imageUrl, platform });
+        const game = new Game({ title, rawgId, imageUrl, platforms });
+
         await game.save();
 
         reply.code(201).send(game);
